@@ -1,0 +1,533 @@
+---
+title: "CROSS: Forecasting heat mortality in Summer 2022 & Summer 2018"
+authors: "Ana Vicedo and Maria Pyrina"
+date: "17/10/2024"
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The goal of this study is to assess the predictive capacity of forecasting system in Switzerland to capture spikes in mortality due to heat. In particular, this analysis aims to compare heat-mortality estimates using different runs of forecast temperature in the several Cantons in the summer of 2022 and summer of 2018, with the estimated heat-related deaths using observed temperatures. 
+- To estimate the ER function using observed temperature-mortality between 1990-2017 (June-August)
+- To quantify heat-related mortality using different runs of temperature (forecast) and observed temperature
+- To compare estimates
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+# LIBRARIES
+library(ncdf4); library(lubridate); library(dplyr) ;
+library(dlnm); library(splines) ;library(MASS) ; library(reshape2)
+library(gnm) ; library(ggplot2) ; library(scales) ; library(tidyverse)
+library(RcppRoll)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+# SET DIRECTORY
+setwd("/s2s/mpyrina/ECMWF_MCH/Ana_model_data/MAIN_folder_ERs")
+```
+
+# 1. EXTRACT THE ER OF THE CANTON
+We just need to load the R space were we stored the BLUPS and the data of mortality summer 2022 and 2018
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+# LOAD SPACE WITH BLUPS 
+load("/s2s/mpyrina/ECMWF_MCH/Ana_model_data/MAIN_folder_ERs/ERforCross.Rdata")
+
+# SELECT THE CANTON
+# Note: use "listcantonsname" to select the canton
+# Zurich:1, Geneve:25, Bern:2, Aargau:19
+ncanton <- 2
+cantname <- "CantBern" # CantGen CantAar CantZur CantBern
+
+# SELECT THE ELEMENTS FOR CANTON N
+predvarsel <- predvar[[ncanton]]
+selblup <- blupall[[ncanton]]
+perc99 <- predvarsel["99%"]
+  
+# REDEFINE THE FUNCTION USING ALL THE ARGUMENTS (BOUNDARY KNOTS INCLUDED)
+argvar <- list(x=predvarsel,fun=varfun,
+                 knots=predvarsel[paste0(varper, "%")],
+                 Bound=predvarsel[c("0%", "100%")])
+if(!is.null(vardegree)) argvar$degree <- vardegree
+bvar <- do.call(onebasis,argvar)
+  
+### ERC PLOTS
+# DEFINE THE MMT (search between the 25th and 90th pctl)
+minpercanton <- (25:90)[which.min((bvar%*%selblup$blup)[25:90])]
+mintempcanton <- predvarsel[paste0(minpercanton, "%")]
+
+# PREDICT ER  
+predblupcanton <- crosspred(bvar,coef=selblup$blup,vcov=selblup$vcov,
+                    model.link="log",by=0.1,cen=mintempcanton)
+  
+plot(predblupcanton,ylim=c(0.6,2),lab=c(6,5,7),xlab="Mean Temperature",
+       ylab="Relative Risk", main=listcantonsname[ncanton], col="red",
+       ci.arg=list(col=alpha("red",0.1)),lwd=1.5)
+
+abline(v=perc99, lty="dashed", col="grey")
+```
+
+
+# 2. LOAD OBSERVED DATA SUMMER (if 2022 or 2018)
+Use the daily mortality and Tmean for the canton all Cantons (pre-processed, from ERL paper) and link it with the Tmean of Tabsd (without weighting, that Maria shared)
+```{r message=FALSE, warning=FALSE}
+
+# SELECT MORTALITY DATA FOR THE CANTON AND THE YEAR
+# CREATE SEQUENCE DATE 
+
+mp_year <- "2022" # select 2022 or 2018
+
+dtasummersel <- datalist2022[[ncanton]] # select if 2022
+#dtasummersel2018 <- datalist2018[[ncanton]] # select if 2018 and uncomment the line bellow
+#dtasummersel <- subset(dtasummersel2018, format(date, "%m") %in% c("06", "07", "08"))
+
+# LOAD AND LINK TABSD DATA 
+# OBSERVATIONS
+mp_file_path <- paste0("/s2s/mpyrina/ECMWF_MCH/Obs_MCH/TabsD_ch02.lonlat_",mp_year,"_",cantname,".nc")
+dtatmeansel <- nc_open(mp_file_path)
+dtatmeansel <- ncvar_get(dtatmeansel, "TabsD")
+
+# CREATE SEQUENCE DATE for the summer of 2018 or 2022
+dateseq <- seq(as.Date("2022/01/01"), as.Date("2022/12/31"), "day")
+#dateseq <- seq(as.Date("2018/01/01"), as.Date("2018/12/31"), "day")
+
+# SELECT TMEAN FOR THE SUMMER MONTHS
+dtatmeansel <- dtatmeansel[month(dateseq) %in% 6:8]
+dtasummersel$tabsd <- dtatmeansel
+summary(dtasummersel[,-1])
+
+# CLIMATOLOGY 
+mp_file_path <- paste0("/s2s/mpyrina/ECMWF_MCH/Obs_MCH/TabsD_ch02.lonlat_1990_2017_CLIM_",cantname,".nc")
+climsel <- nc_open(mp_file_path)
+climsel <- ncvar_get(climsel, "TabsD")
+
+# CREATE SEQUENCE DATE for climatology
+dateseq <- seq(as.Date("2017/01/01"), as.Date("2017/12/31"), "day")
+
+# SELECT TMEAN FOR THE SUMMER MONTHS
+climsel <- climsel[month(dateseq) %in% 6:8]
+dtasummersel$tabsd_clim <- climsel
+summary(dtasummersel[,-1])
+```
+
+# 3. LOAD FORECAST TMEAN DATA
+# no changes
+Daily series from 51 models across summer 2022 or 2018 for a different leadweek (1-7)
+```{r}
+# LOAD THE DATA
+# note: change the code to load thee files for the canton n
+
+file_paths_a <- c(paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week1a.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week2a.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week3a.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week4a.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week5a.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week6a.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week7a.nc"))
+
+file_paths_b <- c(paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week1b.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week2b.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week3b.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week4b.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week5b.nc"),
+                  paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/t2m_",cantname,"_51ens_sum",mp_year,"_lead_week6b.nc"))
+
+
+exposure_week1a <- nc_open(file_paths_a[1])
+t2m_week1a <- ncvar_get(exposure_week1a, "T_2M")
+
+exposure_week2a <- nc_open(file_paths_a[2])
+t2m_week2a <- ncvar_get(exposure_week2a, "T_2M")
+
+exposure_week3a <- nc_open(file_paths_a[3])
+t2m_week3a <- ncvar_get(exposure_week3a, "T_2M")
+
+exposure_week4a <- nc_open(file_paths_a[4])
+t2m_week4a <- ncvar_get(exposure_week4a, "T_2M")
+
+exposure_week5a <- nc_open(file_paths_a[5])
+t2m_week5a <- ncvar_get(exposure_week5a, "T_2M")
+
+exposure_week6a <- nc_open(file_paths_a[6])
+t2m_week6a <- ncvar_get(exposure_week6a, "T_2M")
+
+exposure_week7a <- nc_open(file_paths_a[7])
+t2m_week7a <- ncvar_get(exposure_week7a, "T_2M")
+
+exposure_week1b <- nc_open(file_paths_b[1])
+t2m_week1b <- ncvar_get(exposure_week1b, "T_2M")
+
+exposure_week2b <- nc_open(file_paths_b[2])
+t2m_week2b <- ncvar_get(exposure_week2b, "T_2M")
+
+exposure_week3b <- nc_open(file_paths_b[3])
+t2m_week3b <- ncvar_get(exposure_week3b, "T_2M")
+
+exposure_week4b <- nc_open(file_paths_b[4])
+t2m_week4b <- ncvar_get(exposure_week4b, "T_2M")
+
+exposure_week5b <- nc_open(file_paths_b[5])
+t2m_week5b <- ncvar_get(exposure_week5b, "T_2M")
+
+exposure_week6b <- nc_open(file_paths_b[6])
+t2m_week6b <- ncvar_get(exposure_week6b, "T_2M")
+
+
+# Removing unwanted data
+rm("exposure_week1a","exposure_week1b","exposure_week2a","exposure_week2b",
+   "exposure_week3a","exposure_week3b","exposure_week4a","exposure_week4b",
+   "exposure_week5a","exposure_week5b","exposure_week6a","exposure_week6b",
+  "exposure_week7a")
+```
+
+
+# 4. COMPUTE HEAT MORTALITY USING THE FORECAST DATA
+We use the forward perspective (apply risk over MA of deaths) - keep in mind the NAs at the end of the period.
+```{r}
+# EXTRACT PARAMETERS
+coef <- selblup$blup
+vcov <- selblup$vcov
+
+# DEFINE ARGVAR
+argvar <- list(fun=varfun,knots=predvarsel[paste0(varper, "%")],
+               Bound=predvarsel[c("0%", "100%")])
+
+# CREATE EMPTY ARRAY TO STORE AN PER DAY AND SERIES
+nsim <- 1000
+dailyan_attr <- array(NA,dim=list(13,51,1001,
+                                  length(unique(as.character(dtasummersel$date)))),
+dimnames=list(c("leadweek_1a","leadweek_1b","leadweek_2a",
+                "leadweek_2b","leadweek_3a","leadweek_3b",
+                "leadweek_4a","leadweek_4b","leadweek_5a",
+                "leadweek_5b","leadweek_6a","leadweek_6b",
+                "leadweek_7a"),
+              lapply(seq(1, 51), function(i) paste0("model_", i)),
+              c("an_est",lapply(seq(1, nsim), function(i) paste0("sim_", i))), unique(as.character(dtasummersel$date))))
+
+
+exposure_data <- c('t2m_week1a','t2m_week1b','t2m_week2a',
+                   't2m_week2b','t2m_week3a','t2m_week3b',
+                   't2m_week4a','t2m_week4b','t2m_week5a',
+                   't2m_week5b','t2m_week6a','t2m_week6b','t2m_week7a')
+
+# RESPONSE VARIABLE
+deathsz <- dtasummersel$deaths
+
+# LOOP ACROSS SETS OF FORECASTED DATA
+for (a in 1:13){
+  
+  exposure <- get(exposure_data[a])
+  
+  # LOOP ACROSS MODELS
+  for (b in 1:51){
+    
+    # DERIVE THE CENTERED BASIS
+    expb <- round(exposure[b,],2)
+    bvar <- do.call(onebasis,c(list(x=expb),argvar))
+    cenvec <- do.call(onebasis,c(list(x=mintempcanton),argvar))
+    bvarcen <- scale(bvar,center=cenvec,scale=F)
+
+    # INDICATOR FOR HEAT DAYS (when Tmean is above MMT)
+    indheat <- expb>mintempcanton
+    
+    # DEFINE THE DENOMINATOR (USE MOVING AVERAGE FOLLOWING 10 DAYS)
+    mvdeaths <- roll_mean(deathsz, 10, align="left", fill=NA)
+    
+    # COMPUTE ATTRIBUTABLE MORTALITY 
+    dailyan <- (1-exp(-bvarcen%*%coef))*mvdeaths
+    dailyan_attr[a,b,1,] <- ifelse(indheat,dailyan,0) # set to 0 when Tmean<MMT (no heat day)
+    dailyan_attr[a,b,1,] <- ifelse(is.na(dailyan),NA,dailyan_attr[a,b,1,]) # set NA the last 10 days
+    
+    # SAMPLE COEF ASSUMING A MULTIVARIATE NORMAL DISTRIBUTION
+    set.seed(13041)
+    coefsim <- mvrnorm(nsim,coef,vcov)
+  
+    # LOOP ACROSS ITERATIONS
+    for(c in seq(nsim)) {
+      
+      # COMPUTE THE DAILY CONTRIBUTIONS OF ATTRIBUTABLE DEATHS
+      ansim <- (1-exp(-bvarcen%*%coefsim[c,]))*mvdeaths
+      dailyan_attr[a,b,1+c,] <- ifelse(indheat,ansim,0)
+      dailyan_attr[a,b,1+c,] <- ifelse(is.na(ansim),NA,dailyan_attr[a,b,1+c,])
+    } 
+  }
+}
+
+# EXTRACT RESULTS
+sum_dailyan_attr <- array(NA, dim=list(13, 92, 3), 
+                      dimnames=list(c("leadweek_1a","leadweek_1b","leadweek_2a",
+                                      "leadweek_2b","leadweek_3a","leadweek_3b",
+                                      "leadweek_4a","leadweek_4b","leadweek_5a",
+                                      "leadweek_5b","leadweek_6a","leadweek_6b",
+                                      "leadweek_7a"), 
+                                    unique(as.character(dtasummersel$date)), 
+                                        c("est","cilow", "cihigh")))
+
+sum_dailyan_attr[,,1] <- apply(dailyan_attr[,,1,],c(1,3),mean, na.rm=T)
+sum_dailyan_attr[,,2] <- apply(apply(dailyan_attr[,,-1,], c(1,3,4), mean),
+                               c(1,3),quantile, 0.025, na.rm=T)
+sum_dailyan_attr[,,3] <- apply(apply(dailyan_attr[,,-1,], c(1,3,4), mean),
+                               c(1,3),quantile, 0.975, na.rm=T)
+
+# SUMMARY NUMBER OF FORECASTED DEATHS
+apply(sum_dailyan_attr[,,1], 1, sum, na.rm=T)
+```
+
+
+# 5. COMPUTE OF HEAT-RELATED MORTALITY USING OBSERVED TEMPERATURE 
+We use the "Tabsd" data to compute the heat deaths.
+
+```{r}
+dailyan_obs <- array(NA,dim=list(1001,
+                                 length(unique(as.character(dtasummersel$date)))),
+                       dimnames=list(c("an_est",
+                          lapply(seq(1, nsim), function(i) paste0("sim_", i))),
+                                     unique(as.character(dtasummersel$date))))
+
+
+# DERIVE THE CENTERED BASIS
+expb <- round(dtasummersel$tabsd,2)
+bvar <- do.call(onebasis,c(list(x=expb),argvar))
+cenvec <- do.call(onebasis,c(list(x=mintempcanton),argvar))
+bvarcen <- scale(bvar,center=cenvec,scale=F)
+
+# INDICATOR FOR HEAT DAYS
+indheat <- expb>mintempcanton
+mvdeaths <- roll_mean(deathsz, 10, align="left", fill=NA)
+dailyan <- (1-exp(-bvarcen%*%coef))*mvdeaths
+dailyan_obs[1,] <- ifelse(indheat,dailyan,0)
+dailyan_obs[1,] <- ifelse(is.na(dailyan),NA,dailyan_obs[1,])
+
+# LOOP ACROSS ITERATIONS
+for(c in seq(nsim)) {
+
+    # SAMPLE COEF ASSUMING A MULTIVARIATE NORMAL DISTRIBUTION
+    set.seed(13041)
+    coefsim <- mvrnorm(nsim,coef,vcov)
+      
+    # COMPUTE THE DAILY CONTRIBUTIONS OF ATTRIBUTABLE DEATHS
+    ansim <- (1-exp(-bvarcen%*%coefsim[c,]))*mvdeaths
+    dailyan_obs[1+c,] <- ifelse(indheat,ansim,0)
+    dailyan_obs[1+c,] <- ifelse(is.na(ansim),NA,dailyan_obs[1+c,])
+    } 
+
+sum(dailyan_obs[1,], na.rm=T)  
+
+```
+
+# 5b. COMPUTE OF HEAT-RELATED MORTALITY USING CLIMATOLOGY
+We use the "Tabsd" climatology derived from the years 1990-2017 to compute the heat-related mortality.
+
+```{r}
+dailyan_clim <- array(NA,dim=list(1001,
+                                 length(unique(as.character(dtasummersel$date)))),
+                       dimnames=list(c("an_est",
+                          lapply(seq(1, nsim), function(i) paste0("sim_", i))),
+                                     unique(as.character(dtasummersel$date))))
+
+
+# DERIVE THE CENTERED BASIS
+expb <- round(dtasummersel$tabsd_clim,2)
+bvar <- do.call(onebasis,c(list(x=expb),argvar))
+cenvec <- do.call(onebasis,c(list(x=mintempcanton),argvar))
+bvarcen <- scale(bvar,center=cenvec,scale=F)
+
+# INDICATOR FOR HEAT DAYS
+indheat <- expb>mintempcanton
+mvdeaths <- roll_mean(deathsz, 10, align="left", fill=NA)
+dailyan <- (1-exp(-bvarcen%*%coef))*mvdeaths
+dailyan_clim[1,] <- ifelse(indheat,dailyan,0)
+dailyan_clim[1,] <- ifelse(is.na(dailyan),NA,dailyan_clim[1,])
+
+# LOOP ACROSS ITERATIONS
+for(c in seq(nsim)) {
+
+    # SAMPLE COEF ASSUMING A MULTIVARIATE NORMAL DISTRIBUTION
+    set.seed(13041)
+    coefsim <- mvrnorm(nsim,coef,vcov)
+
+    # COMPUTE THE DAILY CONTRIBUTIONS OF ATTRIBUTABLE DEATHS
+    ansim <- (1-exp(-bvarcen%*%coefsim[c,]))*mvdeaths
+    dailyan_clim[1+c,] <- ifelse(indheat,ansim,0)
+    dailyan_clim[1+c,] <- ifelse(is.na(ansim),NA,dailyan_clim[1+c,])
+    }
+
+sum(dailyan_clim[1,], na.rm=T)
+
+```
+
+
+# 6. PLOTS
+## 6.1 COMPARE ESTIMATES HEAT MORTALITY
+
+```{r}
+dataplot1 <- melt(aperm(sum_dailyan_attr[,,1], c(2,1)),id.vars=c("date"))
+dataplot2 <- melt(aperm(sum_dailyan_attr[,,2], c(2,1)),id.vars=c("date"))
+dataplot3 <- melt(aperm(sum_dailyan_attr[,,3], c(2,1)),id.vars=c("date"))
+  
+dataplot_c <- cbind(dataplot1,dataplot2[,3], dataplot3[3], rep(1:92, 13))
+colnames(dataplot_c) <- c("date", "leadweek", "est", "cilow", "cihigh", "date_num")                         
+rm(dataplot1, dataplot2, dataplot3)
+
+dataplot_c1 <- subset(dataplot_c,leadweek %in% c("leadweek_1a","leadweek_1b",
+                                          "leadweek_2a","leadweek_2b",
+                                          "leadweek_3a","leadweek_3b" ))
+
+dataplot_c1$date <- as.Date(dataplot_c1$date)
+
+dtaplot_dailyobs <- data.frame(est=dailyan_obs[1,], date=dataplot_c1$date)
+
+
+dataplot_c2 <- subset(dataplot_c,leadweek %in% c("leadweek_4a",
+                                          "leadweek_4b","leadweek_5a","leadweek_5b",
+                                          "leadweek_6a","leadweek_6b","leadweek_7a"))
+dataplot_c2$date <- as.Date(dataplot_c2$date)
+
+dataplot_c3 <- subset(dataplot_c,leadweek %in% c("leadweek_1a","leadweek_2a",
+                                          "leadweek_3a","leadweek_4a"))
+
+dataplot_c3$date <- as.Date(dataplot_c3$date)
+```
+
+```{r fig.width = 10}
+ggplot(data=dataplot_c1, aes(x=date, y=est)) +
+  geom_line(aes(color=leadweek)) +
+  geom_ribbon(aes(ymin = cilow, ymax = cihigh,fill = leadweek), alpha=0.4) +
+  geom_hline(yintercept=00, linetype="solid", color = "black") +
+  geom_line(data=dtaplot_dailyobs, color="black") +
+  scale_y_continuous("Heat-related Mortality (N)") +
+  scale_x_date(date_labels = "%B") +
+  theme_minimal() +
+  theme(legend.position="right",
+    axis.text.x = element_text(size=10),    
+    axis.text.y = element_text(size=10),
+    axis.title.y = element_text(size=12, vjust = 1.2),
+    axis.title.x = element_blank(),
+    axis.ticks = element_blank())
+```
+
+```{r fig.width = 10}
+ggplot(data=dataplot_c2, aes(x=date, y=est)) +
+  geom_line(aes(color=leadweek)) +
+  geom_ribbon(aes(ymin = cilow, ymax = cihigh,fill = leadweek), alpha=0.1) +
+  geom_hline(yintercept=00, linetype="solid", color = "black") +
+  geom_line(data=dtaplot_dailyobs, color="black") +
+  scale_y_continuous("Heat-related Mortality (N)") +
+  scale_x_date(date_labels = "%B") +
+  theme_minimal() +
+  theme(legend.position="right",
+    axis.text.x = element_text(size=10),    
+    axis.text.y = element_text(size=10),
+    axis.title.y = element_text(size=12, vjust = 1.2),
+    axis.title.x = element_blank(),
+    axis.ticks = element_blank())
+
+```
+
+```{r fig.width = 10}
+ggplot(data=dataplot_c3, aes(x=date, y=est)) +
+  geom_line(aes(color=leadweek)) +
+  geom_ribbon(aes(ymin = cilow, ymax = cihigh,fill = leadweek), alpha=0.4) +
+  geom_hline(yintercept=00, linetype="solid", color = "black") +
+  geom_line(data=dtaplot_dailyobs, color="black") +
+  scale_y_continuous("Heat-related Mortality (N)") +
+  scale_x_date(date_labels = "%B") +
+  theme_minimal() +
+  theme(legend.position="right",
+    axis.text.x = element_text(size=10),    
+    axis.text.y = element_text(size=10),
+    axis.title.y = element_text(size=12, vjust = 1.2),
+    axis.title.x = element_blank(),
+    axis.ticks = element_blank())
+
+```
+
+
+```{r fig.width = 10}
+# COMPARE OBSERVED VS FORECAST
+dataplot_sel <- subset(dataplot_c,leadweek %in% c("leadweek_1a","leadweek_2a"))
+dataplot_sel$date <- as.Date(dataplot_sel$date)
+
+ggplot(data=dataplot_sel, aes(x=date, y=est)) +
+  geom_line(aes(color=leadweek)) +
+  geom_ribbon(aes(ymin = cilow, ymax = cihigh,fill = leadweek), alpha=0.3) +
+  geom_hline(yintercept=00, linetype="solid", color = "black") +
+  geom_line(data=dtaplot_dailyobs, color="black") +
+  scale_y_continuous("Heat-related Mortality (N)") +
+  #scale_x_date(date_labels = "%B") +
+  theme_minimal() +
+  theme(legend.position="right",
+    axis.text.x = element_text(size=10),    
+    axis.text.y = element_text(size=10),
+    axis.title.y = element_text(size=12, vjust = 1.2),
+    axis.title.x = element_blank(),
+    axis.ticks = element_blank())
+
+
+dataplot_sel <- subset(dataplot_c,leadweek %in% c("leadweek_1a","leadweek_1b"))
+dataplot_sel$date <- as.Date(dataplot_sel$date)
+
+ggplot(data=dataplot_sel, aes(x=date, y=est)) +
+  geom_line(aes(color=leadweek)) +
+  geom_ribbon(aes(ymin = cilow, ymax = cihigh,fill = leadweek), alpha=0.3) +
+  geom_hline(yintercept=00, linetype="solid", color = "black") +
+  geom_line(data=dtaplot_dailyobs, color="black") +
+  scale_y_continuous("Heat-related Mortality (N)") +
+  #scale_x_date(date_labels = "%B") +
+  theme_minimal() +
+  theme(legend.position="right",
+    axis.text.x = element_text(size=10),    
+    axis.text.y = element_text(size=10),
+    axis.title.y = element_text(size=12, vjust = 1.2),
+    axis.title.x = element_blank(),
+    axis.ticks = element_blank())
+
+```
+
+## 6.1 COMPARE TMEAN SERIES
+
+```{r fig.width = 10}
+# PLOT TEMPERATURE
+tmeanleadweek1b <- apply(t2m_week1b,2,mean)
+tmeanleadweek1a <- apply(t2m_week1a,2,mean)
+tmeanleadweek2a <- apply(t2m_week2a,2,mean)
+
+tmeanobs_tabsd <- dtasummersel$tabsd
+
+plot(c(1:92),tmeanleadweek1a,"l", col="red", xlab="Date", ylab="Tmean")
+lines(c(1:92),tmeanleadweek1b, col="navy")
+lines(c(1:92),tmeanobs_tabsd, lwd=2)
+abline(h=18)
+abline(v=c(1:92), col="grey", lwd=0.5)
+legend("topright", 
+  legend = c("lw1a","lw1b", "Tabsd"), 
+  pch= 16,
+  col = c("red", "navy", "black"))
+
+```
+
+```{r fig.width = 10}
+dtaplot_tmean <- data.frame(tmean=as.numeric(cbind(c(tmeanleadweek1a,tmeanleadweek1b,
+                                                     dtasummersel$tabsd))), 
+      type=c(rep("tmeanleadweek1a", length(tmeanleadweek1a)), 
+            rep("tmeanleadweek1b", length(tmeanleadweek1b)),
+            rep("tmenaobs_tabsd", length(dtasummersel$tabsd))))
+
+ggplot(dtaplot_tmean, aes(x=tmean, fill=type, color=type)) + 
+    geom_density(alpha=.2)+
+    geom_vline(xintercept=median(tmeanleadweek1a), linetype="dashed", color = "red") +
+    geom_vline(xintercept=median(tmeanleadweek1b), linetype="dashed", color = "green") +
+    geom_vline(xintercept=median(dtasummersel$tabsd), linetype="dashed", color = "cyan") 
+```
+
+
+```{r}
+save.image(paste0("/s2s/mpyrina/ECMWF_MCH/Output_files/ANforecast_cross_",mp_year,"_",cantname,".Rdata"))
+#```
+
+
